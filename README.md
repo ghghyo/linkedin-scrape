@@ -13,8 +13,8 @@ This is the core automation engine used for bulk scraping posts, comments, and j
 1.  **Prerequisites**: Ensure you have Python 3.10 or higher installed.
 2.  **Clone/Download the Repository**:
     ```bash
-    git clone <repo-url>
-    cd commenter-main
+    git clone https://github.com/ghghyo/linkedin-scrape.git
+    cd linkedin-scrape
     ```
 3.  **Install Dependencies**:
     ```bash
