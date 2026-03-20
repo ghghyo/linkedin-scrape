@@ -214,6 +214,101 @@ def _parse_engagement_number(text: str) -> int:
         return 0
 
 
+def _clean_post_url(url: str) -> str:
+    """Strip tracking params from a LinkedIn post URL."""
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        return urllib.parse.urlunparse(parsed._replace(query="", fragment=""))
+    except Exception:
+        return url
+
+
+def _extract_post_url_from_href(href: str) -> str:
+    """Return a cleaned LinkedIn post permalink if the href looks like one."""
+    if not href:
+        return ""
+
+    cleaned = _clean_post_url(href)
+    if re.search(r"linkedin\.com/posts/", cleaned, re.IGNORECASE):
+        return cleaned
+    if re.search(r"linkedin\.com/feed/update/urn:li:(activity|share|ugcPost):", cleaned, re.IGNORECASE):
+        return cleaned
+    return ""
+
+
+async def _find_post_url_in_element(element) -> str:
+    """Look for a directly embedded post permalink inside the card."""
+    try:
+        hrefs = await element.locator("a[href]").evaluate_all(
+            "(els) => els.map(el => el.href || el.getAttribute('href') || '')"
+        )
+    except Exception:
+        return ""
+
+    # Prefer canonical /posts/ links over feed/update URLs when both exist.
+    for href in hrefs:
+        post_url = _extract_post_url_from_href(href)
+        if post_url and "/posts/" in post_url:
+            return post_url
+
+    for href in hrefs:
+        post_url = _extract_post_url_from_href(href)
+        if post_url:
+            return post_url
+
+    return ""
+
+
+async def _copy_post_link_from_menu(page: Page, element) -> str:
+    """
+    Resolve the real permalink via LinkedIn's "Copy link to post" menu action.
+
+    This is the most reliable source for SDUI cards, where the visible DOM often
+    omits the canonical permalink entirely.
+    """
+    try:
+        await page.context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://www.linkedin.com",
+        )
+    except Exception:
+        pass
+
+    try:
+        menu_btn = element.locator('button[aria-label^="Open control menu for post by"]').first
+        if await menu_btn.count() == 0:
+            return ""
+        await menu_btn.scroll_into_view_if_needed()
+        await short_delay()
+        await menu_btn.click()
+        await short_delay()
+    except Exception as exc:
+        logger.debug("_copy_post_link_from_menu menu open failed: %s", exc)
+        return ""
+
+    try:
+        await page.evaluate("""() => navigator.clipboard.writeText('')""")
+    except Exception:
+        pass
+
+    try:
+        copy_btn = page.get_by_text(re.compile(r"^Copy link(?: to post)?$", re.IGNORECASE)).first
+        await copy_btn.wait_for(state="visible", timeout=2_500)
+        await copy_btn.click()
+        await short_delay()
+        copied = await page.evaluate("""() => navigator.clipboard.readText()""")
+        return _extract_post_url_from_href(copied)
+    except Exception as exc:
+        logger.debug("_copy_post_link_from_menu copy failed: %s", exc)
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return ""
+
+
 def _synthetic_post_url(author_profile_url: str, post_text: str) -> str:
     """
     Build a stable synthetic URL for a post that has no direct activity URN
@@ -405,7 +500,19 @@ async def extract_post_card(
 
     # Post URL — try to find via page state; fall back to synthetic URL
     post_url = ""
-    if page and post_text:
+    if page:
+        try:
+            post_url = await _find_post_url_in_element(element)
+        except Exception as exc:
+            logger.debug("_find_post_url_in_element failed: %s", exc)
+
+    if not post_url and page:
+        try:
+            post_url = await _copy_post_link_from_menu(page, element)
+        except Exception as exc:
+            logger.debug("_copy_post_link_from_menu failed: %s", exc)
+
+    if not post_url and page and post_text:
         try:
             urn = await _sdui_find_urn_for_text(page, post_text)
             if urn:

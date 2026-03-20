@@ -17,6 +17,8 @@ import csv
 import io
 import logging
 import os
+import re
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -49,6 +51,29 @@ def _safe(value) -> str:
     return str(value)
 
 
+def _thread_link(value) -> str:
+    """
+    Export only real LinkedIn post URLs.
+
+    Historical SDUI scraping could store synthetic `/feed/post-ref/...` URLs,
+    which are only internal placeholders and always 404 if opened directly.
+    """
+    url = _safe(value)
+    if not url or "/feed/post-ref/" in url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        cleaned = urllib.parse.urlunparse(parsed._replace(query="", fragment=""))
+    except Exception:
+        cleaned = url
+
+    if re.search(r"linkedin\.com/posts/", cleaned, re.IGNORECASE):
+        return cleaned
+    if re.search(r"linkedin\.com/feed/update/urn:li:(activity|share|ugcPost):", cleaned, re.IGNORECASE):
+        return cleaned
+    return ""
+
+
 def _bool_label(value) -> str:
     if value is True:
         return "yes"
@@ -79,7 +104,7 @@ def export_posts_csv(
             "username": _safe(p.author_name),
             "profile_link": _safe(p.author_profile_url),
             "text": _safe(p.post_text),
-            "thread_link": _safe(p.post_url),
+            "thread_link": _thread_link(p.post_url),
             "pain_point_category": _safe(p.pain_point_category),
             "author_headline": _safe(p.author_headline),
             "is_executive": "",  # Posts: executive flag lives on comments
@@ -111,7 +136,7 @@ def export_comments_csv(
         # Look up the parent post URL
         post_url = ""
         if c.post:
-            post_url = _safe(c.post.post_url)
+            post_url = _thread_link(c.post.post_url)
 
         rows.append({
             "username": _safe(c.author_name),
